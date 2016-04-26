@@ -1,123 +1,104 @@
 <?php
-/**
- * Some constants
- */
-define('FRIENDS_CACHE_PREFIX_KEY', 'chat:friends:{:userId}');
-define('ONLINE_CACHE_PREFIX_KEY', 'chat:online:{:userId}');
-header('Content-Type: application/json; charset=utf-8');
 
 /**
  * Load composer libraries
  */
 require __DIR__ . '/../vendor/autoload.php';
 
+use Symfony\Component\HttpFoundation\Request;
+use app\domain\chat\JSONResponse;
+use app\domain\chat\RedisServiceProvider;
+use Symfony\Component\HttpKernel\HttpKernel;
+use Symfony\Component\EventDispatcher\EventDispatcher;
+use Symfony\Component\HttpKernel\Controller\ControllerResolver;
+use Symfony\Component\HttpKernel\Event\FilterControllerEvent;
+use Symfony\Component\HttpKernel\KernelEvents;
+use Pimple\Container;
+
+/**
+ * Load Service Container
+ */
+$pimple = new Container();
+
+/**
+ * Some constants
+ */
+define('FRIENDS_CACHE_PREFIX_KEY', 'chat:friends:{:userId}');
+define('ONLINE_CACHE_PREFIX_KEY', 'chat:online:{:userId}');
+
+
 /**
  * Load .env
  */
 $dotenv = new Dotenv\Dotenv(__DIR__ . '/../');
 $dotenv->load();
-
 /**
  * Load configuration
  */
-$redisHost = getenv('REDIS_HOST');
-$redisPort = getenv('REDIS_PORT');
-$allowedDomains = explode(',', getenv('ALLOWED_DOMAINS'));
-$allowBlankReferrer = getenv('ALLOW_BLANK_REFERRER') || false;
 
-/**
- * Check configuration
- */
-if (empty($redisHost) || empty($redisPort) || empty($allowedDomains) || !is_array($allowedDomains)) {
-    http_response_code(500);
-    echo json_encode(['error' => true, 'message' => 'Server error, invalid configuration.']);
-    exit();
-}
+$request = Request::createFromGlobals();
+$pimple["request"] = $request;
+$pimple->register(new RedisServiceProvider());
+$request->attributes->set('pimple', $pimple);
 
-/**
- * CORS check
- */
-$httpOrigin = !empty($_SERVER['HTTP_ORIGIN']) ? $_SERVER['HTTP_ORIGIN'] : null;
-if ($allowBlankReferrer || in_array($httpOrigin, $allowedDomains)) {
-    header('Access-Control-Allow-Credentials: true');
-    if ($httpOrigin) {
-        header("Access-Control-Allow-Origin: $httpOrigin");
-    }
-} else {
-    http_response_code(403);
-    echo json_encode(['error' => true, 'message' => 'Not a valid origin.']);
-    exit();
-}
+$request->server->set("ALLOWED_DOMAINS", explode(',', getenv('ALLOWED_DOMAINS')));
 
-/**
- * No cookie, no session ID.
- */
-if (empty($_COOKIE['app'])) {
-    http_response_code(403);
-    echo json_encode(['error' => true, 'message' => 'Not a valid session.']);
-    exit();
-}
+$request->attributes->set("_controller", function(Request $request, JSONResponse $response) use ($pimple) {
+    $controller = new app\domain\chat\FriendListController();
+    return $controller->getFriendlistAction($request, $response, $pimple);
+});
 
-try {
-    // Create a new Redis connection
-    $redis = new Redis();
-    $redis->connect($redisHost, $redisPort);
-
-    if (!$redis->isConnected()) {
-        http_response_code(500);
-        echo json_encode(['error' => true, 'message' => 'Server error, can\'t connect.']);
-        exit();
+$dispatcher = new EventDispatcher();
+$dispatcher->addListener(KernelEvents::CONTROLLER, function(FilterControllerEvent $event) use ($pimple) {
+    $request = $event->getRequest();
+    $globalResponse = new JSONResponse();
+    $request->attributes->set("response", $globalResponse);
+    /**
+     * Check configuration
+     */
+    if (empty($request->server->get("REDIS_HOST", null)) || empty($request->server->get("REDIS_PORT", null)) || empty($request->server->get("ALLOWED_DOMAINS", array()))) {
+        $event->setController(function() {
+            return new JSONResponse(['error' => true, 'message' => 'Server error, invalid configuration.'], 500);
+        });
     }
 
-    // Set Redis serialization strategy
-    $redis->setOption(Redis::OPT_SERIALIZER, Redis::SERIALIZER_PHP);
-
-    $sessionHash = $_COOKIE['app'];
-    $session = $redis->get(join(':', ['PHPREDIS_SESSION', $sessionHash]));
-
-    // Don't set cookie, let's keep it lean
-    header_remove('Set-Cookie');
-
-    if (!empty($session['default']['id'])) {
-        $friendsList = $redis->get(str_replace('{:userId}', $session['default']['id'], FRIENDS_CACHE_PREFIX_KEY));
-        if (!$friendsList) {
-            // No friends list yet.
-            http_response_code(200);
-            echo json_encode([]);
-            exit();
+    /**
+     * CORS check
+     */
+    $httpOrigin = $event->getRequest()->headers->get("http_origin", null);
+    if ($request->server->get("ALLOW_BLANK_REFERRER", false) || in_array($httpOrigin, $request->get("ALLOWED_DOMAINS", array()))) {
+        $globalResponse->headers->set('Access-Control-Allow-Credentials', 'true');
+        if ($httpOrigin) {
+            $globalResponse->headers->set('Access-Control-Allow-Origin', $httpOrigin);
         }
     } else {
-        http_response_code(404);
-        echo json_encode(['error' => true, 'message' => 'Friends list not available.']);
-        exit();
+        $event->setController(function() {
+            return new JSONResponse(['error' => true, 'message' => 'Not a valid origin.'], 403);
+        });
     }
 
-    $friendUserIds = $friendsList->getUserIds();
-
-    if (!empty($friendUserIds)) {
-        $keys = array_map(function ($userId) {
-            return str_replace('{:userId}', $userId, ONLINE_CACHE_PREFIX_KEY);
-        }, $friendUserIds);
-
-        // multi-get for faster operations
-        $result = $redis->mget($keys);
-
-        $onlineUsers = array_filter(
-            array_combine(
-                $friendUserIds,
-                $result
-            )
-        );
-
-        if ($onlineUsers) {
-            $friendsList->setOnline($onlineUsers);
-        }
+    /**
+     * No cookie, no session ID.
+     */
+    if (empty($request->cookies->get('app'))) {
+        $event->setController(function() {
+            return new JSONResponse(['error' => true, 'message' => 'Not a valid session.'], 403);
+        });
     }
-    http_response_code(200);
-    echo json_encode($friendsList->toArray());
-    exit();
+    if (!$pimple['redis']->isConnected()) {
+        $event->setController(function() {
+            return new JSONResponse(['error' => true, 'message' => 'Server error, can\'t connect.'], 500);
+        });
+    }
+});
+
+$resolver = new ControllerResolver();
+$kernel = new HttpKernel($dispatcher, $resolver);
+try {
+    $response = $kernel->handle($request);
+    $response->send();
 } catch (Exception $e) {
-    http_response_code(500);
-    echo json_encode(['error' => true, 'message' => 'Unknown exception. ' . $e->getMessage()]);
-    exit();
+    $errReponse = new JSONResponse(['error' => true, 'message' => 'Unknown exception. ' . $e->getMessage()], 500);
+    $errReponse->send();
 }
+$kernel->terminate($request, $response);

@@ -7,6 +7,8 @@
   },
   "require": {
     "ext-redis": "*",
-    "vlucas/phpdotenv": "2.2.0"
+    "vlucas/phpdotenv": "2.2.0",
+    "symfony/http-kernel": "^3.0",
+    "pimple/pimple": "~3.0"
   }
 }
