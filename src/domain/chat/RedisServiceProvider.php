@@ -17,12 +17,16 @@ use Pimple\ServiceProviderInterface;
 class RedisServiceProvider implements ServiceProviderInterface {
     public function register(Container $pimple)
     {
-        $pimple["redis"]=$pimple->factory(function($pimple)  {
+        $pimple["redis"]=function($pimple)  {
+            try{
             $redis = new \Redis();
-            $redis->connect($pimple["request"]->server->get("REDIS_HOST"),$pimple["request"]->server->get("REDIS_PORT") );
+            $redis->connect($pimple["settings"]->get("REDIS_HOST"),$pimple["settings"]->get("REDIS_PORT") );
             $redis->setOption(\Redis::OPT_SERIALIZER, \Redis::SERIALIZER_PHP);
+            }catch(\Exception $e){
+                
+            }
             return $redis;
-        });
+        };
         
     }
 }

@@ -17,11 +17,22 @@ use Pimple\Container;
  * @author argenisfd
  */
 class FriendListController {
-    public function getFriendlistAction(Request $request, JSONResponse $response, Container $pimple){
-        $redis=$pimple['redis'];
+    /**
+     *
+     * @var Container 
+     */
+    
+    private $container;
+    
+    public function __construct(Container $pimple) {
+        $this->container=$pimple;
+    }
+    public function getFriendlistAction(Request $request, JSONResponse $response){
+        $redis=$this->container['redis'];
+        $settings=$this->container['settings'];
         $session = $redis->get(join(':', ['PHPREDIS_SESSION', $request->cookies->get("app")]));
         if (!empty($session['default']['id'])) {
-            $friendsList = $redis->get(str_replace('{:userId}', $session['default']['id'], FRIENDS_CACHE_PREFIX_KEY));
+            $friendsList = $redis->get(str_replace('{:userId}', $session['default']['id'], $settings->get("FRIENDS_CACHE_PREFIX_KEY")));
             if (!$friendsList) {
                 // No friends list yet.
                 $response->setContent([]);
@@ -37,8 +48,8 @@ class FriendListController {
         $friendUserIds = $friendsList->getUserIds();
 
         if (!empty($friendUserIds)) {
-            $keys = array_map(function ($userId) {
-                return str_replace('{:userId}', $userId, ONLINE_CACHE_PREFIX_KEY);
+            $keys = array_map(function ($userId) use ($settings) {
+                return str_replace('{:userId}', $userId, $settings->get("ONLINE_CACHE_PREFIX_KEY"));
             }, $friendUserIds);
 
             // multi-get for faster operations
@@ -58,7 +69,7 @@ class FriendListController {
         $response->setStatusCode(200);
         $response->setContent($friendsList->toArray());
         $response->setPrivate();
-        $response->setMaxAge($request->server->get("FRIENDLIST_HTTP_CACHE_TIME",0));
+        $response->setMaxAge($settings->get("FRIENDLIST_HTTP_CACHE_TIME",0));
         return $response;
     }
 }
